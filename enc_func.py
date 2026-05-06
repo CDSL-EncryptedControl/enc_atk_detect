@@ -22,6 +22,7 @@ class Params:
 
     def __init__(self, config: EncryptionConfig | None = None):
         config = EncryptionConfig() if config is None else config
+        # q is the working modulus and invL is used to undo message scaling modulo q.
         self.p = int(config.p)
         self.L = int(config.L)
         self.r = float(config.r)
@@ -33,6 +34,7 @@ class Params:
 def Seret_key(env):
     """Sample a ternary secret key in {-1, 0, 1}^N."""
 
+    # The notebook follows the LWE-style ternary secret-key choice from the paper.
     key = [random.choice([-1, 0, 1]) for _ in range(env.N)]
     return np.array(key, dtype=object).reshape(-1, 1)
 
@@ -40,6 +42,7 @@ def Seret_key(env):
 def Mod(x, p):
     """Apply centered modular reduction element-wise over scalars or arrays."""
 
+    # Keep representatives in [-p/2, p/2) so decrypted values stay centered around zero.
     x_arr = np.asarray(x, dtype=object)
     out = np.empty(x_arr.shape, dtype=object)
     half_p = p // 2
@@ -57,6 +60,7 @@ def Mod(x, p):
 def rand_mod_q(shape, q):
     """Sample an object-dtype array with entries chosen uniformly from [0, q)."""
 
+    # Object dtype avoids overflow when later multiplying by large modular values.
     total = int(np.prod(shape))
     values = [random.randrange(q) for _ in range(total)]
     return np.array(values, dtype=object).reshape(shape)
@@ -69,9 +73,11 @@ def Enc_state(z_hat_bar, sk, env, T1, T2, V2):
     z_hat_bar = np.asarray(z_hat_bar, dtype=object).reshape(n, 1)
     sk = np.asarray(sk, dtype=object).reshape(env.N, 1)
 
+    # A and e generate the standard LWE masking term b_ini = A sk + e.
     A = rand_mod_q((n, env.N), env.q)
     e = np.random.randint(-env.r, env.r + 1, size=(n, 1)).astype(object)
     b_ini = Mod(A @ sk + e, env.q)
+    # The extra b_prime term cancels the disclosed residual channel's masking dynamics.
     b_tilde = Mod(T2 @ b_ini, env.q)
     b_xi_ini = Mod(T1 @ b_ini, env.q)
     b_prime = Mod(V2 @ b_tilde, env.q)
@@ -90,9 +96,11 @@ def Enc_t(v, sk, b_xi, Sigma_pinv, Sigma, Psi, env):
     Sigma_pinv = np.asarray(Sigma_pinv, dtype=object).reshape(6, 1)
     Psi = np.asarray(Psi, dtype=object).reshape(1, 23)
 
+    # Fresh randomness is generated at every step for the encrypted input/output packet.
     Av = rand_mod_q((n_v, env.N), env.q)
     e = np.random.randint(-env.r, env.r + 1, size=(n_v, 1)).astype(object)
     b_v = Mod(Av @ sk + e, env.q)
+    # This correction term enforces zero masking on the disclosed residual component.
     b_prime = Mod(Sigma_pinv @ (Sigma @ b_v + Psi @ b_xi), env.q)
     c0 = Mod(env.L * v + b_v - b_prime, env.q)
     return np.hstack([c0, Av, b_prime]), b_v
@@ -101,6 +109,7 @@ def Enc_t(v, sk, b_xi, Sigma_pinv, Sigma, Psi, env):
 def Dec(ciphertext, sk, env):
     """Decrypt a ciphertext matrix and return the scaled integer message."""
 
+    # The last column stores the structured correction term introduced by the modified scheme.
     dec_sk = np.vstack([
         np.ones((1, 1), dtype=object),
         -np.asarray(sk, dtype=object).reshape(-1, 1),

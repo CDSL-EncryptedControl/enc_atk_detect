@@ -63,10 +63,12 @@ class SimulationData:
 
 
 def observability_matrix(A: np.ndarray, C: np.ndarray) -> np.ndarray:
+    # Stack C, CA, ..., CA^(n-1) for rank tests and coordinate construction.
     return np.vstack([C @ np.linalg.matrix_power(A, k) for k in range(A.shape[0])])
 
 
 def build_plant_matrices(config: PlantConfig = PlantConfig()) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Build the continuous-time three-inertia model, then discretize it at Ts.
     A0 = np.array([
         [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
         [-config.k1 / config.J1, -config.b1 / config.J1, config.k1 / config.J1, 0.0, 0.0, 0.0],
@@ -96,6 +98,7 @@ def build_plant_matrices(config: PlantConfig = PlantConfig()) -> tuple[np.ndarra
 
 
 def discrete_lqr_gain(A: np.ndarray, B: np.ndarray, config: LQRConfig = LQRConfig()) -> np.ndarray:
+    # Solve the discrete Riccati equation and return the stabilizing feedback gain.
     Q = np.diag(np.asarray(config.Q_diag, dtype=np.float64))
     R = np.diag(np.asarray(config.R_diag, dtype=np.float64))
     X = linalg.solve_discrete_are(A, B, Q, R)
@@ -104,6 +107,7 @@ def discrete_lqr_gain(A: np.ndarray, B: np.ndarray, config: LQRConfig = LQRConfi
 
 @lru_cache(maxsize=None)
 def _build_model_data_cached(config: FGHConfig) -> ModelData:
+    # Start from the discretized plant and its nominal state-feedback controller.
     A, B, C = build_plant_matrices(config.plant)
     K = discrete_lqr_gain(A, B, config.lqr)
 
@@ -111,6 +115,7 @@ def _build_model_data_cached(config: FGHConfig) -> ModelData:
     F_raw, G_raw, H_raw, phi_obs_list = [], [], [], []
 
     for Ci in sensor_rows:
+        # Extract the observable subspace seen by a single sensor output.
         Oi = observability_matrix(A, Ci)
         li_i = int(np.linalg.matrix_rank(Oi))
         phi_i_obs = linalg.qr(Oi[:li_i, :].T, mode="economic")[0].T
@@ -122,6 +127,7 @@ def _build_model_data_cached(config: FGHConfig) -> ModelData:
 
     phi_final, F_can, G_can, H_can = [], [], [], []
     for Fi, Gi, Hi, phi_i_obs in zip(F_raw, G_raw, H_raw, phi_obs_list):
+        # Convert each observable subsystem to canonical coordinates.
         li_i = Fi.shape[0]
         Oi_small = observability_matrix(Fi, Hi)
         e_last = np.zeros((li_i, 1), dtype=np.float64)
@@ -140,6 +146,7 @@ def _build_model_data_cached(config: FGHConfig) -> ModelData:
         phi_final.append(T_i @ phi_i_obs)
 
     L_list = [Fi[:, [-1]] for Fi in F_can]
+    # Stack the partial observers into the block observer used in the notebook.
     F_bar = linalg.block_diag(*[Fi - Li @ Hi for Fi, Li, Hi in zip(F_can, L_list, H_can)])
     G_bar = np.hstack([np.vstack(G_can), linalg.block_diag(*L_list)])
 
@@ -150,6 +157,7 @@ def _build_model_data_cached(config: FGHConfig) -> ModelData:
 
     H_blocks = []
     for idx_tuple in combinations(range(len(phi_final)), 3):
+        # Each block compares the full estimate against one attack-free sensor subset candidate.
         Pk = np.linalg.pinv(np.vstack([phi_final[idx] for idx in idx_tuple]))
         Hk = np.zeros((A.shape[0], cum_li[-1]), dtype=np.float64)
         col_start = 0
@@ -164,10 +172,12 @@ def _build_model_data_cached(config: FGHConfig) -> ModelData:
 
 
 def build_model_data(config: FGHConfig | None = None) -> ModelData:
+    # Public wrapper around the cached model builder.
     return _build_model_data_cached(FGHConfig() if config is None else config)
 
 
 def build_TV(H1: np.ndarray, q: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # Build the T/V factors that isolate one residual channel's zero dynamics.
     H1 = np.asarray(H1, dtype=object).reshape(STATE_DIM)
     T1 = T1_TEMPLATE.copy()
     T2 = H1.reshape(1, STATE_DIM)
@@ -181,11 +191,13 @@ def build_TV(H1: np.ndarray, q: int) -> tuple[np.ndarray, np.ndarray, np.ndarray
 
 
 def float_to_object_int(arr_float: np.ndarray) -> np.ndarray:
+    # Round floating-point arrays into Python ints so modular arithmetic stays exact.
     rounded = np.rint(np.asarray(arr_float, dtype=np.float64))
     return np.array([int(value) for value in rounded.flat], dtype=object).reshape(rounded.shape)
 
 
 def compute_offline_mats(env, s=100000, num_channels=60, config: FGHConfig | None = None, model=None):
+    # Precompute all integer-valued observer data reused across simulation steps.
     model = build_model_data(config) if model is None else model
     scale = int(s)
     F_bar = float_to_object_int(model.F_bar)
@@ -195,6 +207,7 @@ def compute_offline_mats(env, s=100000, num_channels=60, config: FGHConfig | Non
 
     T1_all, T2_all, V2_all, S_xi_all, S_v_all, Psi_all, Sigma_all, Sigma_pinv_all = [], [], [], [], [], [], [], []
     for channel_idx in range(num_channels):
+        # Assemble the per-channel matrices used by the masked encrypted update.
         H1 = H_bar[channel_idx, :]
         T1, T2, V1, V2 = build_TV(H1, env.q)
         H1_row = H1.reshape(1, -1)
@@ -230,6 +243,7 @@ def compute_offline_mats(env, s=100000, num_channels=60, config: FGHConfig | Non
 
 
 def prepare_simulation_data(env, s_quant=100000, num_channels=60, config: FGHConfig | None = None) -> SimulationData:
+    # Convenience entry point that returns both the real-valued model and offline integer data.
     model = build_model_data(config)
     offline = compute_offline_mats(env, s_quant, num_channels=num_channels, config=config, model=model)
     return SimulationData(model=model, offline=offline)
